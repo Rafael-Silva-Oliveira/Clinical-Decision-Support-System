@@ -1,0 +1,11 @@
+{
+  "requires": true,
+  "lockfileVersion": 1,
+  "dependencies": {
+    "html-decision-tree": {
+      "version": "0.0.6",
+      "resolved": "https://registry.npmjs.org/html-decision-tree/-/html-decision-tree-0.0.6.tgz",
+      "integrity": "sha512-LquFaK3AbYn3ZMKOSR1+Kx36pJNcK425aKyotnb7Iq/3w1xhxjMabA4Us4c9LoLD0bfXr0rop2Bw/6nx2wTQmw=="
+    }
+  }
+}

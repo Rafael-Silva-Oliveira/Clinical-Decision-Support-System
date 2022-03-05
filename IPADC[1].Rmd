@@ -1,0 +1,589 @@
+---
+title: "Apoio à decisão Clínica"
+output:
+  html_document:
+    theme: united
+    toc: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+# Objetivo
+
+* Este projeto tem como objetivo o desenvolvimento de uma web app que permite ao médico introduzir dados de um determinado doente de modo a auxiliar no diagnóstico de doença coronária. Deste modo, foi realizado um modelo de regressão logistica em que o outcome/variavel resposta é a variav `HeartDisease`. O modelo tem os seguintes preditores: `HeartDisease ~ Gr_etario+Sex+ChestPainType+RestingBP+Cholesterol+FastingBS+MaxHR+ExerciseAngina` onde ChestPainType é o tipo de dor de peito, FastingBS é o nivel de glucose em jejum (1 se for > 120, 0 caso contrario), ExerciseAngina é a presença/ausencia (1/0) de angina durante exercicio fisico, MaxHR é a frequencia cardiaca maxima e o RestingBP é a pressão arterial em repouso. 
+* Com base neste modelo, será desenvolvido um questionario com várias etapas (questões), permitindo ao médico escolher uma das opções e, no final, terá como output a presença/ausença de doença coronaria (Ver a possibilidade de colocar a probabilidade de ter doença coronaria com base nas escolhas feitas). O prototipo do website pode ser acedido neste website (incompleto, ainda será necessário estabelecer questões e valores para avaliar o doente): https://diaignostics.w3spaces.com/index.html
+
+
+
+# Modulos
+```{r r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(tibble)
+library(ggplot2)
+library(GGally)
+library(raincloudplots)
+library(treemapify)
+library(SmartEDA)
+library(ggplot2)
+library(gganimate)
+library(gifski)
+library(gapminder)
+library(magick)
+library(pROC)
+library(ggplot2)
+library(plotROC)#obter geom_roc para curvas ROC e AUC
+library(OptimalCutpoints) # corte de ponto optimo e visualizaÃ§Ã£o
+################
+library(caret)
+library(pROC)
+library(ThresholdROC)
+library(ROCR)
+library(tidyverse)
+library(moments)
+library(tidyr)
+
+
+```
+
+
+# Tratamento de Dados
+```{r}
+
+df = as.data.frame(read.csv("heart.csv"))
+cols = c("Sex", "ChestPainType", "RestingECG", "FastingBS", "ExerciseAngina", "ST_Slope", "HeartDisease")
+df[cols] = lapply(df[cols], factor)
+
+# Adicionar grupos etarios 
+for (age in df[,1]) {
+  if (age < 40) {
+    df$Gr_etario.1[df$Age==age] = "Menos de 40 anos"
+  } else if (age >= 40 && age < 60) {
+    df$Gr_etario.1[df$Age==age] = "Entre 40 e 60 anos"
+  } else {
+    df$Gr_etario.1[df$Age==age] = "Acima de 60 anos"
+  }
+}
+# Adicionar outro grupo de 35 até 50
+
+# Mudar a posiçao da coluna adicionada
+df = add_column(df, Gr_etario = df$Gr_etario, .after = "Age")
+df$Gr_etario = factor(df$Gr_etario, levels = c("Menos de 40 anos", "Entre 40 e 60 anos", "Acima de 60 anos"))
+# Remover coluna temporaria
+df$Gr_etario.1 = NULL
+
+# Mapa de distribuição
+
+tbl=as.data.frame(table(df$Gr_etario))
+names(tbl)[1]="Gr_etario"
+
+```
+
+### Variavel Colesterol - Valores nulos/NA
+```{r}
+
+
+mad(df$Cholesterol) #contabilizando os 0s
+boxplot(df$Cholesterol)
+hist(df$Cholesterol)
+# Passar valores nulos para Na
+df$Cholesterol[df$Cholesterol == 0] = NA
+
+# Colocar em grafico os valores em falta
+df %>%
+  summarise_all(list(~is.na(.)))%>%
+  pivot_longer(everything(),
+               names_to = "variables", values_to="missing") %>%
+  count(variables, missing) %>%
+  ggplot(aes(y=variables,x=n,fill=missing))+
+  geom_col()
+
+boxplot(df$Cholesterol)
+hist(df$Cholesterol)
+# Para preencher os valores NA podemos usar Mediana ou MAD (tem em conta os outliers proveneintes do boxplot)
+
+
+# Criar vetor com os valores que temos (sem valores NA)
+cholesterol_sem_valores_nulos = NULL
+cholesterol_sem_valores_nulos <-df$Cholesterol[!is.na(df$Cholesterol)]
+mad(cholesterol_sem_valores_nulos) #desvio padrao tendo em conta outliers
+missing_values = sum(is.na(df$Cholesterol))
+missing_values
+# Criar sequencia aleatoria de modo a preencher os valores em falta (0 ou NA) com a mediana + - desvio padrao mediano
+
+# Set seed
+set.seed(42)
+
+# Fazer uma amostra com media aparada da nossa populaçao (colesterol sem valores nuloes) com desvio padrao igual ao desvio padrao mediano (de colesterol sem valores nulos)
+fill_NA_values_cholesterol = sample(rnorm(n = missing_values, mean = mean(cholesterol_sem_valores_nulos, trim = 0.2), sd = mad(cholesterol_sem_valores_nulos)), size = missing_values) #podemos retirar o trim e o mad substituindo pelo sd para ter valores mais "proximos" dos dados originais (contendo os outliers)
+
+# Comparar media da sample com media populacional
+summary(fill_NA_values_cholesterol)
+summary(cholesterol_sem_valores_nulos) # as medias, medianas 1º quartil e 3º quartil sao bastante proximos da nossa populaçao original com menos outliers
+sd(fill_NA_values_cholesterol)
+sd(cholesterol_sem_valores_nulos)
+
+
+# Preencher agora os valores NA em falta no dataset original com os fill_NA_values
+
+df$Cholesterol[is.na(df$Cholesterol)] <- fill_NA_values_cholesterol
+
+summary(cholesterol_sem_valores_nulos)
+summary(df$Cholesterol)
+
+```
+# Dados
+
+```{r}
+ExpData(data=df, type=1)
+ExpData(data=df, type=2)
+
+
+```
+
+
+# Modelo Regressao Logistica
+
+## Avaliação Cruzada
+
+```{r}
+
+#Dados de treino e dados de teste
+
+index <- createDataPartition(df$HeartDisease, p = .70, list = FALSE)
+train <- df[index,]
+test <- df[-index,]
+
+
+```
+
+
+## Treino do Modelo (Dados de Treino)
+
+```{r}
+#Modelo completo
+modelo = glm(HeartDisease ~ Gr_etario+Sex+ChestPainType+RestingBP+Cholesterol+FastingBS+MaxHR+ExerciseAngina, family = binomial(link="logit"),data=train)
+summary(modelo)
+
+```
+
+
+## Validação de Pressupostos
+### Multicolinearidade
+
+```{r}
+
+
+#Validar pressupostos do modelo
+library(car)
+
+    #Multicolinearidade
+vif(modelo)
+
+
+```
+
+## Predição de Classes (Treino e Teste)
+
+```{r}
+
+###### Treino
+# train$HeartDiseasePredictedProbability <- predict(modelo, newdata = train, "response")
+# pred_train <- prediction( train$HeartDiseasePredictedProbability, train$HeartDisease)
+
+
+###### Teste
+test$HeartDiseasePredictedProbability <- predict(modelo, newdata = test, "response")
+pred_test <- prediction( test$HeartDiseasePredictedProbability, test$HeartDisease)
+
+```
+
+## Avaliar Significado e Qualidade do modelo
+
+### Significado do Modelo - LR Test
+
+```{r}
+# H0: Não há diferença entre os  modelos (Rácios LL proximos de 1 – remover a variavel não altera o modelo)
+# H1: Há diferença entre os  modelos (Rácios LL diferentes de 1) 
+
+modelo_0 = glm(HeartDisease ~ 1, family = binomial(link="logit"), data=train)
+library(lmtest)
+lrtest(modelo_0, modelo) #modelo tem significado
+
+
+```
+
+
+### Avaliar qualidade - Curva ROC
+```{r}
+
+
+library(pROC)
+#Prediçao das classes com dados de treino e cyrva ROC
+
+perf = performance(pred_test, "tpr","fpr")
+perf
+plot(perf) 
+
+
+## Outra alternativa para prediçao e curva ROC:
+predicted_complete_model = predict(modelo, type="response")
+
+AUC = auc(test$HeartDisease, test$HeartDiseasePredictedProbability)
+AUC
+ci(AUC)
+
+plot.roc(test$HeartDisease, test$HeartDiseasePredictedProbability)
+
+################
+## usar ggplot para um grafico bonitinho, para modelo_heart e selecionar valores corte
+## que maximiza a distancia a linha diagonal (Youden index), i.e. maximizar a soma 
+## de sensibilidade e especificidade
+## ler um artigo exemplo: https://onlinelibrary.wiley.com/doi/full/10.1038/oby.2009.455
+
+####################################################
+## criar a DF com a previsao/observacao e visualizar curva ROC
+# M<-predict(modelo,data=train,type="response")
+# D<-train$HeartDisease
+# 
+# teste<-data.frame(M,D,HeartDisease=train$HeartDisease)
+# test
+####################################################
+## criar uma visualizao da escolha do ponto de corte
+
+corte_teste<-optimal.cutpoints(data=test,X="HeartDiseasePredictedProbability",status="HeartDisease",methods = c("Youden"),tag.healthy = 0)
+corte_teste
+
+```
+## Ponto de Cut-off (Indice de Youden)
+```{r}
+
+
+# Ponto de cut-off -> Estabeleci como 0.5 temporariamente. Proximo passo: Procurar forma de criar um ponto de cut-off com base no index de Youden
+
+# for (i in 1:length(train$HeartDisease)) {
+#   if (train$HeartDiseasePredictedProbability[i] >= 0.5066) {
+#     train$HeartDiseasePredictedClass[i] = 1
+#   } else {
+#     train$HeartDiseasePredictedClass[i] = 0
+#   }
+# }
+
+
+for (i in 1:length(test$HeartDisease)) {
+  if (test$HeartDiseasePredictedProbability[i] >= 0.5066) {
+    test$HeartDiseasePredictedClass[i] = 1
+  } else {
+    test$HeartDiseasePredictedClass[i] = 0
+  }
+}
+```
+
+
+## Matriz de Confusao - Precisão
+
+
+### Estatisticas para dados de treino
+
+```{r}
+
+
+# train$HeartDiseasePredictedClass = as.factor(train$HeartDiseasePredictedClass)
+# train_matrix = confusionMatrix(train$HeartDiseasePredictedClass, train$HeartDisease) 
+# train_matrix
+```
+
+### Estatisticas para dados Teste
+
+
+```{r}
+
+test$HeartDiseasePredictedClass = as.factor(test$HeartDiseasePredictedClass)
+test_matrix = confusionMatrix(test$HeartDiseasePredictedClass, test$HeartDisease) 
+test_matrix
+
+```
+```{r}
+library(broom)
+tidy(test_matrix)
+test_matrix
+```
+
+
+### Matriz gráfica dados Treino
+
+```{r}
+
+
+# matriz_treino = as.data.frame(train_matrix$table)
+# ggplot(matriz_treino, aes(Prediction,Reference, fill= Freq)) +
+#         geom_tile() + geom_text(aes(label=Freq)) +
+#         scale_fill_gradient(low="white", high="#009194") +
+#         labs(x = "Reference",y = "Prediction") +
+#         scale_x_discrete(labels=c("0","1")) +
+#         scale_y_discrete(labels=c("0","1"))
+
+
+
+```
+
+### Matriz grafica para dados Teste
+
+```{r}
+
+matriz_teste = as.data.frame(test_matrix$table)
+ggplot(matriz_teste, aes(Prediction,Reference, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+
+
+```
+
+
+## StepAIC (Seleção automatica de variaveis)
+
+```{r}
+
+# Seleçao automatica de variaveis
+library(MASS)
+step = stepAIC(modelo, direction="both")
+step$anova #Modelo decidiu remover Gr_etario, no entanto, acredito que o Modelo final deverá ser : Gr_etario + Sex + ChestPainType + Cholesterol + FastingBS + MaxHR + ExerciseAngina uma vez que o valor p do grupo etario mostrou ser significativo (alfa = 0.10)
+step
+library(stargazer)
+
+glm_out = glm(formula = HeartDisease ~  Age + Sex  + FastingBS + MaxHR + ExerciseAngina, family = binomial(link = "logit"), 
+    data = train)
+
+
+model =  exp(coef(glm_out))
+
+stargazer(glm_out, type="html", coef=list(model), out="model.htm")
+
+coef.vector <- exp(model$coef)
+stargazer(model,coef=list(coef.vector))
+```
+
+
+
+
+## Arvore de decisao
+
+```{r}
+
+library(rpart)
+#install.packages("rpart.plot")
+library(rpart.plot)
+arvore <- rpart(HeartDisease~Age+Sex+FastingBS+MaxHR+ExerciseAngina, data = test, method = 'class')
+rpart.plot(arvore, extra = 106)
+
+summary(modelo)
+
+```
+
+![Plot title. ](IPADC_insertimage_1.png)
+![Plot title. ](IPADC_insertimage_2.png)
+
+### Arvores de decisao com base em varaiveis especificas
+
+```{r}
+
+arvore <- rpart(HeartDisease~Age+Sex+ExerciseAngina+MaxHR, data = test, method = 'class')
+rpart.plot(arvore, extra = 106)
+
+
+#Age+Sex+FastingBS+MaxHR+ExerciseAngina
+
+# Sex:
+  # F = 0.31
+  # M = 0.62
+
+# FastingBS
+  # 0 = 0.47
+  # 1 = 0.81
+
+# ExerciseAngina:
+  # N = 0.37
+  # Y = 0.83
+
+# Age:
+  # < 46
+  # >= 46 - 0.62
+    # < 60 - 0.57
+      # >= 50 - 0.67
+              # < 55 - 0.46
+              # >= 55 - 0.61
+      # < 50 - 0.54
+    # >= 60 - 0. 74
+
+# MaxHR:
+  # 
+      
+# randm forest -crair varias arvores aleatorias, e ver importancia dos nodos - fazer validaçao cruzada 
+
+
+  
+```
+![Plot title. ](IPADC_insertimage_3.png)
+### TODO: Adicionar validaçao externa com dados de instituiçoes externas
+
+
+# Random forests - Gerar importancia das variaveis
+
+
+
+
+```{r}
+library(ranger)
+test
+
+second_rf <-  ranger(HeartDisease~., data = test, num.trees = 50, 
+                     importance = "impurity")
+second_rf
+
+v = as.vector(second_rf$variable.importance)
+w = (as.vector((colnames(df))))
+DF=cbind(w,v)
+DF = as.data.frame(DF)
+DF$v = as.numeric(DF$v)
+
+ggplot(DF, aes(x=reorder(w,v), y=v,fill=v))+ 
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Importancia das Variaveis")+
+  xlab("")+
+  ggtitle("Sumario da Importancia das Variaveis")+
+  guides(fill=F)+
+  scale_fill_gradient(low="red", high="blue")
+
+
+
+
+```
+
+
+```{r}
+library(randomForest)
+library(party)
+# 
+# options(repos='http://cran.rstudio.org')
+# have.packages <- installed.packages()
+# cran.packages <- c('devtools','plotrix','randomForest','tree')
+# to.install <- setdiff(cran.packages, have.packages[,1])
+# if(length(to.install)>0) install.packages(to.install)
+# 
+# library(devtools)
+# if(!('reprtree' %in% installed.packages())){
+#   install_github('araastat/reprtree')
+# }
+# for(p in c(cran.packages, 'reprtree')) eval(substitute(library(pkg), list(pkg=p)))
+
+
+
+#model <- randomForest(Species ~ ., data=iris, importance=TRUE, ntree=500, mtry = 2, do.trace=100)
+
+
+
+```
+
+## Score
+
+```{r}
+##################################
+
+##################################
+##      criar um score          ##
+##  podemos usar probabilidade  ##
+##     ou componente linear     ##
+##        do modelo RL          ##
+##################################
+Pred_l<-modelo$linear.predictors
+dados<-data.frame(Pred_l,Prob=modelo$fitted,HeartDisease=train$HeartDisease)
+dados
+ggplot(dados,aes(x=Pred_l,y=Prob))+geom_point(aes(shape=factor(HeartDisease),color=factor(HeartDisease)))+theme_bw()
+
+
+
+# usar o valor previsto em 3 classes de risco (baixo medio e alto)
+for (i in 1:length(test$HeartDisease)) {
+  if (test$HeartDiseasePredictedProbability[i]<= 1/3)  {
+    test$HeartDiseaseLevel[i] = "baixo"
+  } else if (test$HeartDiseasePredictedProbability[i]>= 2/3)  {
+    test$HeartDiseaseLevel[i] = "alto" 
+  } else {
+    test$HeartDiseaseLevel[i] = "medio"
+  }
+}
+
+#Passar os niveis de Doença Coronaria para fator e estabelecer niveis de  modo a ordenar os diferentes niveis na caixa de bigodes
+test$HeartDiseaseLevel = factor(test$HeartDiseaseLevel, levels = c("baixo","medio","alto"))
+
+#Boxplot
+boxplot(test$HeartDiseasePredictedProbability~test$HeartDiseaseLevel,ylab = "Probabilidade de evento",xlab = "Niveis de Risco")
+
+
+baixo<-modelo$fitted.values<=1/3
+medio<-modelo$fitted.values<=2/3 & !baixo
+alto<-modelo$fitted.values>=2/3
+classes<-c("baixo","medio","alto")
+niveis<-baixo*1+medio*2+alto*3 # criar os niveis em numero - Por cada observaçao no dataset, diz-nos se é nivel 1 (baixo), nivel 2 (medio") ou nivel 3 (alto)
+niveis_risco<-classes[niveis] # criar as designaçoes dos estractos de risco
+Prob=modelo$fitted.values
+
+# visualizar o predictor linear por classe(niveis) de risco
+boxplot(Pred_l~niveis_risco,ylab = "Predictor linear",xlab = "niveis de risco")
+
+# visualizar target~niveis e tabela de proporçoes
+#tabela
+tb<-table(test$HeartDisease,test$HeartDiseaseLevel)
+t(tb)
+prop.test(t(tb))
+# por nivel de risco
+barplot(table(test$HeartDisease,test$HeartDiseaseLevel),ylab="n casos",xlab="niveis risco", legend=c("HeartDisease=0","HeartDisease=1"))
+
+```
+
+# Variaveis Numericas
+
+### Sumario de Variaveis Numericas
+
+```{r}
+
+#Sumario de variaveis numericas
+ExpNumStat(df,by="A",gp=NULL,Qnt=seq(0,1,0.1),MesofShape=2,Outlier=TRUE,round=2,Nlim=10)
+```
+
+### Distribuição de variaveis numericas (Univariado)
+
+```{r}
+plot1 <- ExpNumViz(df,target=NULL,nlim=10,Page=c(2,2))
+plot1[[1]]
+
+
+```
+
+
+### Graficos de dispersao
+
+```{r}
+
+library(ggcorrplot)
+
+# MatCorr=cor(df[,sapply(df,is.numeric)])
+# #ggcorrplot(MatCorr)
+# ggcorrplot(MatCorr,hc.order = TRUE,type = "lower",lab = TRUE)
+
+ggpairs(df[,sapply(df,is.numeric)])
+
+```
+
+
+```{r}
+
+test
+```
+
+# VERIFICAR ODD RATIO 
